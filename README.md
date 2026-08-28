@@ -40,7 +40,7 @@
 
 项目应以 UTF-8 原子写入状态 JSON，并在成功、失败、取消或用户停止时写入明确终态。执行注册或启动前，Codex 会先解析项目目录、解释器、启动脚本、artifact 目录和进程身份，并运行 DryRun。
 
-该技能不会因论文插图中的 “panel” 或普通 UI 面板讨论而触发。
+该技能不会因插图中的 “panel” 或普通 UI 面板讨论而触发。
 
 ## English
 
@@ -80,7 +80,7 @@ Use $panel-runner to run this independently, but do not start a panel; report pr
 
 The project should atomically write UTF-8 status JSON and publish a clear terminal state on success, failure, cancellation, or user stop. Before registration or launch, Codex resolves the project root, interpreter, launcher, artifact directory, and process identity, then performs a DryRun.
 
-The skill does not activate for scientific figure panels or ordinary UI panel discussions.
+The skill does not activate for figure panels or ordinary UI panel discussions.
 
 ## Repository contents
 
