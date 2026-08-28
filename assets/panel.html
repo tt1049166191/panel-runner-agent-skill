@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Project Panel</title>
+  <style>
+    :root{color-scheme:dark;--bg:#071018;--card:#101d29;--card2:#0b1620;--line:#263a4c;--text:#eef7ff;--muted:#91a7ba;--cyan:#42d8cf;--blue:#6097ff;--amber:#ffbf5b;--red:#ff6578}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0,#12304b 0,transparent 38%),var(--bg);color:var(--text);font:14px/1.5 system-ui,"Microsoft YaHei",sans-serif}
+    main{max-width:1480px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:18px}.title{font-size:28px;font-weight:760}.sub{color:var(--muted);margin-top:5px;word-break:break-all}.badge{padding:8px 12px;border-radius:999px;background:#17354a;color:var(--cyan);font-weight:750;white-space:nowrap}.badge.static{background:#3a3018;color:var(--amber)}
+    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.card{background:linear-gradient(145deg,#122331e8,#0d1924f2);border:1px solid var(--line);border-radius:14px;padding:15px;box-shadow:0 12px 30px #0004}.wide{grid-column:span 2}.full{grid-column:1/-1}.k{color:var(--muted);font-size:12px;letter-spacing:.08em;text-transform:uppercase}.v{font-size:24px;font-weight:720;margin-top:5px;overflow-wrap:anywhere}.small{font-size:15px}.track{height:12px;background:#061019;border-radius:9px;overflow:hidden;margin-top:11px}.fill{height:100%;background:linear-gradient(90deg,var(--blue),var(--cyan));transition:width .35s}.row{display:flex;justify-content:space-between;gap:12px;color:var(--muted);margin-top:8px}.good{color:var(--cyan)}.warn{color:var(--amber)}.bad{color:var(--red)}
+    details{background:var(--card2);border:1px solid var(--line);border-radius:12px;margin-top:10px;overflow:hidden}summary{cursor:pointer;padding:12px 14px;font-weight:700}pre{margin:0;padding:14px;border-top:1px solid var(--line);overflow:auto;max-height:430px;color:#c5daeb;font:12px/1.5 Consolas,monospace;white-space:pre-wrap;word-break:break-word}.meta{color:var(--muted);font-size:12px;padding:0 14px 12px;word-break:break-all}.foot{color:var(--muted);font-size:12px;margin-top:12px}
+    @media(max-width:900px){.grid{grid-template-columns:1fr 1fr}.wide{grid-column:span 2}}@media(max-width:560px){main{padding:16px}.grid{grid-template-columns:1fr}.wide,.full{grid-column:span 1}.top{flex-direction:column}.row{flex-direction:column;gap:2px}}
+  </style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <div><div class="title">Project Panel</div><div class="sub" id="artifact">等待状态文件……</div></div>
+    <div class="badge" id="mode">LIVE</div>
+  </div>
+  <div class="grid">
+    <section class="card"><div class="k">状态</div><div class="v" id="status">STARTING</div></section>
+    <section class="card"><div class="k">阶段</div><div class="v small" id="phase">—</div></section>
+    <section class="card"><div class="k">Epoch</div><div class="v" id="epoch">—</div></section>
+    <section class="card"><div class="k">PID</div><div class="v" id="pid">—</div></section>
+    <section class="card wide">
+      <div class="k">进度</div><div class="track"><div class="fill" id="fill" style="width:0%"></div></div>
+      <div class="row"><span id="pct">0%</span><span id="steps">—</span></div>
+    </section>
+    <section class="card wide"><div class="k">运行信息</div><div class="v small" id="runtime">—</div><div class="row"><span id="speed">—</span><span id="eta">—</span></div></section>
+    <section class="card full"><div class="k">权威 JSON 文档</div><div id="documents"></div></section>
+  </div>
+  <div class="foot" id="foot">只读面板 · 不会控制项目</div>
+</main>
+<script id="panel-static-state" type="application/json">__PANEL_STATIC_STATE_JSON__</script>
+<script>
+const embedded=JSON.parse(document.querySelector('#panel-static-state').textContent);
+const fmt=(x,n=2)=>Number.isFinite(Number(x))?Number(x).toFixed(n):'—';
+const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function render(s){
+  const d=s.derived||{},isStatic=s.mode==='static';
+  document.querySelector('#artifact').textContent=s.artifact||'—';
+  const mode=document.querySelector('#mode');mode.textContent=isStatic?'STATIC FINAL':'LIVE';mode.classList.toggle('static',isStatic);
+  const status=document.querySelector('#status');status.textContent=String(d.status||'unknown').toUpperCase();status.className='v '+(s.terminal?'warn':'good');
+  document.querySelector('#phase').textContent=d.phase??'—';document.querySelector('#epoch').textContent=d.epoch!=null?`${d.epoch}/${d.epochs??'—'}`:'—';
+  document.querySelector('#pid').textContent=d.pid?`${d.pid} · ${d.pid_alive?'alive':'not running'}`:'—';
+  let fraction=Number(d.fraction_complete);if(!Number.isFinite(fraction))fraction=0;fraction=Math.max(0,Math.min(1,fraction));
+  document.querySelector('#fill').style.width=`${100*fraction}%`;document.querySelector('#pct').textContent=`${fmt(100*fraction,1)}%`;document.querySelector('#steps').textContent=`${d.step??'—'} / ${d.total_steps??'—'}`;
+  document.querySelector('#runtime').textContent=d.updated_at?`状态更新 ${d.updated_at}`:'没有更新时间';document.querySelector('#speed').textContent=d.speed!=null?`速度 ${fmt(d.speed,2)}`:'速度 —';document.querySelector('#eta').textContent=d.eta_seconds!=null?`ETA ${fmt(d.eta_seconds,0)} s`:'ETA —';
+  const docs=s.documents||{},meta=s.document_meta||{};document.querySelector('#documents').innerHTML=Object.entries(docs).map(([name,value])=>{const m=meta[name]||{},err=m.read_error?` · ${m.read_error}`:'';return `<details ${name==='progress'?'open':''}><summary>${esc(name)}${err?'<span class="bad">'+esc(err)+'</span>':''}</summary><div class="meta">${esc(m.path||'')} · ${esc(m.modified_at||'missing')} · ${esc(m.size_bytes||0)} bytes</div><pre>${esc(JSON.stringify(value,null,2))}</pre></details>`}).join('');
+  document.querySelector('#foot').textContent=`${isStatic?'静态终态快照':'只读实时面板'} · 捕获 ${s.captured_at||'—'} · ${s.terminal?'终态':'运行态'}`;
+}
+__PANEL_BOOTSTRAP__
+</script>
+</body>
+</html>
