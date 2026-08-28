@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -22,7 +23,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-DEFAULT_DOCUMENTS = ("runner.json", "progress.json", "metrics.json", "config.json")
+DEFAULT_DOCUMENTS = (
+    "runner.json",
+    "progress.json",
+    "metrics.json",
+    "config.json",
+    "panel_job.json",
+    "panel_manifest.json",
+)
 TERMINAL_WORDS = {
     "complete",
     "completed",
@@ -93,13 +101,27 @@ def safe_stat(path: Path) -> dict[str, Any]:
 
 
 def first_value(documents: dict[str, dict[str, Any]], keys: tuple[str, ...]) -> Any:
-    for document_name in ("progress", "runner", "metrics", "config"):
+    value, _ = first_value_with_source(documents, keys)
+    return value
+
+
+def first_value_with_source(
+    documents: dict[str, dict[str, Any]], keys: tuple[str, ...]
+) -> tuple[Any, str | None]:
+    for document_name in (
+        "progress",
+        "runner",
+        "metrics",
+        "config",
+        "panel_job",
+        "panel_manifest",
+    ):
         document = documents.get(document_name, {})
         for key in keys:
             value = document.get(key)
             if value is not None and value != "":
-                return value
-    return None
+                return value, f"{document_name}.{key}"
+    return None, None
 
 
 def normalize_status(value: Any) -> str:
@@ -146,9 +168,33 @@ def process_alive(pid: int | None) -> bool:
     return True
 
 
-def windows_command_line(pid: int) -> str | None:
-    if os.name != "nt" or pid <= 0:
+def process_command_line(pid: int) -> str | None:
+    if pid <= 0:
         return None
+    if os.name != "nt":
+        proc_path = Path("/proc") / str(pid) / "cmdline"
+        try:
+            command_line = proc_path.read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", errors="replace"
+            ).strip()
+            if command_line:
+                return command_line
+        except OSError:
+            pass
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+            )
+            command_line = result.stdout.strip()
+            return command_line or None
+        except (OSError, subprocess.SubprocessError):
+            return None
     system_root = os.environ.get("SystemRoot", r"C:\Windows")
     powershell = Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
     script = (
@@ -171,6 +217,59 @@ def windows_command_line(pid: int) -> str | None:
         return None
     command_line = result.stdout.strip()
     return command_line or None
+
+
+def terminate_process_tree(pid: int, timeout_seconds: float = 5.0) -> dict[str, Any]:
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["taskkill.exe", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return {
+                "ok": result.returncode == 0,
+                "returncode": result.returncode,
+                "stdout": result.stdout.strip()[-2000:],
+                "stderr": result.stderr.strip()[-2000:],
+                "method": "taskkill_tree",
+            }
+        except (OSError, subprocess.SubprocessError) as error:
+            return {"ok": False, "error": f"{type(error).__name__}: {error}"}
+
+    try:
+        process_group = os.getpgid(pid)
+    except OSError as error:
+        return {"ok": not process_alive(pid), "error": f"{type(error).__name__}: {error}"}
+    current_group = os.getpgrp()
+    if process_group == current_group:
+        return {"ok": False, "refused": "target_shares_lifecycle_process_group"}
+    use_group = process_group == pid
+    try:
+        if use_group:
+            os.killpg(process_group, signal.SIGTERM)
+        else:
+            os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while process_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if process_alive(pid):
+            if use_group:
+                os.killpg(process_group, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        return {
+            "ok": not process_alive(pid),
+            "method": "posix_process_group" if use_group else "posix_single_process",
+            "process_group": process_group,
+        }
+    except OSError as error:
+        return {"ok": not process_alive(pid), "error": f"{type(error).__name__}: {error}"}
 
 
 def run_schtasks(arguments: list[str]) -> dict[str, Any]:
@@ -232,7 +331,7 @@ def cleanup_runtime(
 
     pid_result: dict[str, Any] = {"pid": pid, "alive_before": process_alive(pid)}
     if pid_result["alive_before"]:
-        command_line = windows_command_line(int(pid or 0))
+        command_line = process_command_line(int(pid or 0))
         pid_result["command_line"] = command_line
         hint = (expected_command_substring or "").strip()
         if int(pid or 0) == os.getpid():
@@ -244,25 +343,7 @@ def cleanup_runtime(
         elif hint.casefold() not in command_line.casefold():
             pid_result["refused"] = "command_identity_mismatch"
         else:
-            try:
-                result = subprocess.run(
-                    ["taskkill.exe", "/PID", str(int(pid or 0)), "/T", "/F"],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=20,
-                    check=False,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                pid_result["kill"] = {
-                    "ok": result.returncode == 0,
-                    "returncode": result.returncode,
-                    "stdout": result.stdout.strip()[-2000:],
-                    "stderr": result.stderr.strip()[-2000:],
-                }
-            except (OSError, subprocess.SubprocessError) as error:
-                pid_result["kill"] = {"ok": False, "error": f"{type(error).__name__}: {error}"}
+            pid_result["kill"] = terminate_process_tree(int(pid or 0))
     time.sleep(0.25)
     pid_result["alive_after"] = process_alive(pid)
     actions.append({"kind": "verified_pid_cleanup", "result": pid_result})
@@ -284,7 +365,13 @@ class SnapshotReader:
             documents[key] = value
             document_meta[key] = {"path": str(path), **safe_stat(path), "read_error": error}
 
-        status = normalize_status(first_value(documents, ("status", "state")))
+        project_status = normalize_status(first_value(documents, ("status", "state")))
+        supervisor_status = normalize_status(documents.get("panel_job", {}).get("status"))
+        status = (
+            supervisor_status
+            if is_terminal_status(supervisor_status, self.terminal_statuses)
+            else project_status
+        )
         step = as_number(first_value(documents, ("step", "global_step", "batch")))
         total = as_number(first_value(documents, ("total_steps", "total_optimizer_steps", "steps")))
         fraction = as_number(first_value(documents, ("fraction_complete", "progress_fraction")))
@@ -292,7 +379,7 @@ class SnapshotReader:
             fraction = step / total
         if fraction is not None:
             fraction = min(1.0, max(0.0, fraction))
-        pid_value = first_value(documents, ("pid", "process_id"))
+        pid_value, pid_source = first_value_with_source(documents, ("pid", "process_id", "job_pid"))
         try:
             pid = int(pid_value) if pid_value is not None else None
         except (TypeError, ValueError):
@@ -319,6 +406,7 @@ class SnapshotReader:
                 "eta_seconds": first_value(documents, ("eta_seconds",)),
                 "updated_at": first_value(documents, ("updated_at", "heartbeat_at")),
                 "pid": pid,
+                "pid_source": pid_source,
                 "pid_alive": process_alive(pid),
             },
             "documents": documents,
@@ -430,9 +518,12 @@ def terminal_watcher(
         snapshot = reader.snapshot("headless" if server is None else "live")
         derived = snapshot["derived"]
         possible_orphan = (
-            is_active_status(str(derived.get("status", "")))
-            and derived.get("pid") is not None
+            derived.get("pid") is not None
             and not bool(derived.get("pid_alive"))
+            and (
+                is_active_status(str(derived.get("status", "")))
+                or str(derived.get("pid_source", "")).startswith("panel_manifest.")
+            )
         )
         orphan_first_seen = (orphan_first_seen or time.monotonic()) if possible_orphan else None
         orphaned = bool(

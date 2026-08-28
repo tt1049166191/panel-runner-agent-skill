@@ -1,6 +1,6 @@
 interface:
   display_name: "Panel Runner"
-  short_description: "独立运行项目、监听 JSON，并在终态安全静态化面板"
-  default_prompt: "Use $panel-runner to run this project independently with a live JSON panel and safe terminal cleanup."
+  short_description: "跨平台独立运行项目、监听 JSON 并安全静态化面板"
+  default_prompt: "Use $panel-runner to run this local project independently of the agent with a live JSON panel and safe terminal cleanup."
 policy:
   allow_implicit_invocation: true

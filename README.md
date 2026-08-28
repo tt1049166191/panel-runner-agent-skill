@@ -1,86 +1,152 @@
-# Panel Runner for Codex
+# Panel Runner — Universal Agent Skill
 
 [中文](#中文说明) · [English](#english)
 
 ## 中文说明
 
-`panel-runner` 是一个面向 Windows 长时任务的 Codex Skill。当用户在项目运行或进度监控语境中提到 **panel** 时，它会让任务独立于 Codex 运行，并提供只读实时面板。
+`panel-runner` 是一个面向任意本地长时任务的通用 Agent Skill，例如构建、批处理、数据转换、下载、渲染、导出、训练或本地服务。它兼容能够读取 `SKILL.md`、执行本地命令并持续访问同一文件系统的智能体客户端，可在 Windows、macOS 和 Linux 上使用。
 
-它也适合希望任务启动后关闭 Codex 的用户：在确认后台任务与监控均已稳定运行后，项目仍会独立继续执行。
+当用户在项目运行或进度监控语境中提到 **panel** 时，它会让任务脱离当前智能体会话运行，并提供只读实时面板。它尤其适合希望任务启动后关闭 Codex 或其他智能体客户端的用户：在确认后台任务与监控稳定后，项目会在同一台本地计算机上继续独立执行。
 
 ### 主要功能
 
-- 使用隐藏、Limited、无触发器的 Windows 计划任务运行项目；关闭 Codex 后任务仍可继续。
-- 实时读取 `runner.json`、`progress.json` 和 `metrics.json`，面板不会反向控制任务。
-- 任务结束后，将最终状态保存为可离线打开的静态 `panel.final.html`。
-- 按精确任务名、PID 和命令行身份安全停止后台任务及面板，避免误杀其他进程。
+- 使用纯 Python 跨平台启动器，将项目和生命周期监控进程与智能体终端分离。
+- 自动记录任务 PID、命令、退出码和终态；项目已有 `runner.json`、`progress.json` 或 `metrics.json` 时也会实时聚合显示。
+- 任务进入成功、失败、取消或用户停止等终态后，将最终状态保存为可离线打开的静态 `panel.final.html`。
+- 根据 PID、完整命令行和独立进程组校验身份后再清理后台，避免误杀其他进程。
 - 用户明确说“不要面板”时，切换到 JSON-only 模式：不开端口、不启动网页，仅监听 JSON 并负责终态清理。
+- Windows 可选用隐藏、Limited、无触发器的计划任务后端，获得更稳健的本地脱离运行能力。
+
+### 支持范围
+
+该 Skill 不绑定某个模型、智能体品牌或账号。只要客户端支持 Agent Skills/`SKILL.md` 并允许本地文件与进程操作，就可以读取和执行它。`agents/openai.yaml` 只是可选的 Codex 界面元数据，不会建立账号绑定。
+
+完整后台生命周期需要：
+
+- Python 3.10 或更高版本；
+- 本地 Windows、macOS 或 Linux 主机；
+- 智能体有权访问项目目录、启动本地进程和监听 localhost。
+
+如果智能体运行在会随会话销毁的云端沙箱、临时容器或 ephemeral worktree 中，关闭会话可能同时销毁运行环境；任何 detached launcher 都无法绕过这个宿主生命周期限制。
 
 ### 安装
 
-将本仓库复制到 Codex 的个人技能目录：
+将仓库复制到智能体客户端支持的个人 Skills 目录。以 Codex 为例：
 
 ```text
-%USERPROFILE%\.codex\skills\panel-runner
+Windows: %USERPROFILE%\.codex\skills\panel-runner
+macOS/Linux: ~/.codex/skills/panel-runner
 ```
 
-然后在新的 Codex 任务中使用。技能默认允许自动触发，也可以显式输入 `$panel-runner`。
+其他客户端请按其 Agent Skills/`SKILL.md` 目录规范安装。也可以让智能体直接读取本仓库中的 `SKILL.md`。
 
 ### 使用示例
 
 ```text
-用 panel 运行这个训练项目，并实时显示进度。
+用 panel 独立运行这个耗时项目，我关闭智能体后它也要继续运行。
 ```
 
 ```text
-用 $panel-runner 独立运行这个任务，但不要面板，直接读取 JSON 告诉我进度。
+用 panel-runner 独立运行这个任务，但不要面板，直接读取 JSON 告诉我进度。
 ```
 
-### 运行约定
+### 跨平台启动器
 
-项目应以 UTF-8 原子写入状态 JSON，并在成功、失败、取消或用户停止时写入明确终态。执行注册或启动前，Codex 会先解析项目目录、解释器、启动脚本、artifact 目录和进程身份，并运行 DryRun。
+智能体应先运行 DryRun：
 
-该技能不会因论文插图中的 “panel” 或普通 UI 面板讨论而触发。
+```bash
+python scripts/launch_detached.py \
+  --project-root /path/to/project \
+  --artifact artifacts/run-001 \
+  --expected-command-substring train.py \
+  --dry-run \
+  -- python train.py --output artifacts/run-001
+```
+
+确认后去掉 `--dry-run`。JSON-only 模式增加 `--no-panel`。
+
+Windows 上如需使用计划任务增强后端，可先执行：
+
+```powershell
+.\scripts\install_panel_tasks.ps1 <参数> -DryRun
+```
+
+### 项目状态约定
+
+普通命令无需改造：内置 supervisor 会自动写入 PID、命令、退出码和终态。若项目希望展示更丰富的步骤、速度、ETA 或指标，可以额外以 UTF-8 原子写入 `runner.json`、`progress.json` 和 `metrics.json`。Skill 会把实际命令、PID、平台和输出路径记录到 `panel_manifest.json`，并拒绝任务冲突、端口冲突或无法验证身份的进程清理。
 
 ## English
 
-`panel-runner` is a Codex Skill for long-running Windows jobs. When **panel** is mentioned in a project execution or progress-monitoring context, it runs the job independently of Codex and exposes a read-only live dashboard.
+`panel-runner` is a universal Agent Skill for any long-running local job, including builds, batch processing, data conversion, downloads, rendering, exports, training, and local services. It works with agent clients that can read `SKILL.md`, execute local commands, and retain access to the same filesystem, on Windows, macOS, and Linux.
 
-It is also useful for users who want to close Codex after a job starts: once the detached job and monitor are verified healthy, the project continues running independently.
+When **panel** is mentioned in an execution or progress-monitoring context, the skill detaches the job from the current agent session and exposes a read-only live dashboard. It is especially useful for users who want to close Codex or another agent client after launch: once the detached job and monitor are verified healthy, the project continues on the same local machine.
 
 ### Features
 
-- Runs the project through hidden, Limited, triggerless Windows Scheduled Tasks, so it can continue after Codex closes.
-- Reads `runner.json`, `progress.json`, and `metrics.json` in real time without sending control commands back to the job.
-- Freezes the final state into an offline `panel.final.html` when the job reaches a terminal state.
-- Stops the job and panel using exact task names plus PID and command-line identity checks.
-- Supports an explicit JSON-only mode: no HTTP port or web panel, only headless JSON monitoring and terminal cleanup.
+- Uses a pure-Python cross-platform launcher to detach both the job and lifecycle monitor from the agent terminal.
+- Automatically records the job PID, command, exit code, and terminal state, while also aggregating existing `runner.json`, `progress.json`, or `metrics.json` files when present.
+- Freezes terminal state into an offline `panel.final.html` on success, failure, cancellation, or user stop.
+- Cleans up only after verifying PID, full command line, and process-group identity.
+- Supports JSON-only mode with no HTTP port or web panel.
+- Retains an optional hidden, Limited, triggerless Windows Task Scheduler backend for stronger local persistence.
+
+### Compatibility
+
+The skill is not tied to a model, agent vendor, or account. Any client that supports Agent Skills/`SKILL.md` and permits local filesystem and process access can interpret it. `agents/openai.yaml` is optional Codex UI metadata and does not bind an account.
+
+Full lifecycle execution requires:
+
+- Python 3.10 or later;
+- a local Windows, macOS, or Linux host;
+- permission to access the project, start local processes, and listen on localhost.
+
+If the agent runs inside a cloud sandbox, temporary container, or ephemeral worktree that is destroyed with the session, closing the session may destroy the host itself. No detached launcher can outlive that host lifecycle.
 
 ### Installation
 
-Copy this repository to the personal Codex skills directory:
+Copy the repository into the personal Skills directory supported by the agent client. For Codex, for example:
 
 ```text
-%USERPROFILE%\.codex\skills\panel-runner
+Windows: %USERPROFILE%\.codex\skills\panel-runner
+macOS/Linux: ~/.codex/skills/panel-runner
 ```
 
-Use it from a new Codex task. Automatic invocation is enabled, or invoke it explicitly with `$panel-runner`.
+For other clients, follow their Agent Skills/`SKILL.md` directory convention, or point the agent directly at this repository's `SKILL.md`.
 
 ### Examples
 
 ```text
-Run this training project with a panel and show live progress.
+Run this long job with a panel and keep it running after I close the agent client.
 ```
 
 ```text
-Use $panel-runner to run this independently, but do not start a panel; report progress from the JSON files.
+Use panel-runner to run this independently, but do not start a panel; report progress from the JSON files.
+```
+
+### Portable launcher
+
+Run a DryRun first:
+
+```bash
+python scripts/launch_detached.py \
+  --project-root /path/to/project \
+  --artifact artifacts/run-001 \
+  --expected-command-substring train.py \
+  --dry-run \
+  -- python train.py --output artifacts/run-001
+```
+
+Remove `--dry-run` after review. Add `--no-panel` for JSON-only mode.
+
+On Windows, the optional Task Scheduler backend starts with:
+
+```powershell
+.\scripts\install_panel_tasks.ps1 <arguments> -DryRun
 ```
 
 ### Runtime contract
 
-The project should atomically write UTF-8 status JSON and publish a clear terminal state on success, failure, cancellation, or user stop. Before registration or launch, Codex resolves the project root, interpreter, launcher, artifact directory, and process identity, then performs a DryRun.
-
-The skill does not activate for scientific figure panels or ordinary UI panel discussions.
+An ordinary command requires no modification: the built-in supervisor records its PID, command, exit code, and terminal state. A project may additionally atomically write UTF-8 `runner.json`, `progress.json`, and `metrics.json` files to expose richer steps, speed, ETA, or metrics. The skill records the exact command, PIDs, platform, and output paths in `panel_manifest.json`, and refuses live-run collisions, occupied ports, or process cleanup without a verified identity.
 
 ## Repository contents
 
@@ -90,9 +156,12 @@ panel-runner/
 ├── agents/openai.yaml
 ├── assets/panel.html
 ├── references/lifecycle-contract.md
-└── scripts/
+├── scripts/
+    ├── launch_detached.py
+    ├── job_supervisor.py
     ├── install_panel_tasks.ps1
     └── panel_runtime.py
+└── tests/smoke_detached.py
 ```
 
-Windows only. The runtime uses Python's standard library and built-in Windows task/process tools.
+The portable runtime uses only the Python standard library. The optional Windows backend uses built-in PowerShell and Task Scheduler tools.

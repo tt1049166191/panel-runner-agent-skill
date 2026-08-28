@@ -5,3 +5,4 @@ __pycache__/
 panel_manifest.json
 panel_runtime.json
 panel.final.html
+logs/
