@@ -17,6 +17,8 @@ import time
 from typing import Any
 import urllib.request
 
+from panel_runtime import load_view, parse_document_specs
+
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
@@ -192,6 +194,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
     parser.add_argument("--artifact", type=Path, required=True)
+    parser.add_argument("--view", "--template", dest="view", type=Path,
+                        help="project-specific HTML path relative to project root; required unless --no-panel")
+    parser.add_argument("--document", action="append", default=[], metavar="NAME=PATH",
+                        help="additional JSON path relative to artifact directory; repeat as needed")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
@@ -236,12 +242,22 @@ def main() -> int:
     skill_root = Path(__file__).resolve().parent.parent
     runtime = skill_root / "scripts" / "panel_runtime.py"
     supervisor = skill_root / "scripts" / "job_supervisor.py"
-    template = skill_root / "assets" / "panel.html"
     try:
         python = resolve_python(args.python)
+        documents = parse_document_specs(args.document, artifact)
     except ValueError as error:
         raise SystemExit(str(error)) from error
-    for required in (runtime, supervisor, template):
+    view = None
+    if not args.no_panel:
+        if args.view is None:
+            raise SystemExit("live panel requires --view PATH; create a project-specific HTML view first, or use --no-panel")
+        view = args.view.expanduser()
+        view = (view if view.is_absolute() else project_root / view).resolve()
+        try:
+            load_view(view)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise SystemExit(f"invalid project view: {error}") from error
+    for required in (runtime, supervisor):
         if not required.is_file():
             raise SystemExit(f"required file does not exist: {required}")
 
@@ -268,8 +284,6 @@ def main() -> int:
         str(runtime),
         "--artifact",
         str(artifact),
-        "--template",
-        str(template),
         "--runtime-state",
         str(runtime_state),
         "--expected-command-substring",
@@ -281,11 +295,15 @@ def main() -> int:
     ]
     for status in args.terminal_status:
         panel_command.extend(["--terminal-status", status])
+    for name, path in documents.items():
+        panel_command.extend(["--document", f"{name}={path}"])
     if args.no_panel:
         panel_command.extend(["--headless", "--skip-static"])
     else:
         panel_command.extend(
             [
+                "--view",
+                str(view),
                 "--host",
                 args.host,
                 "--port",
@@ -318,6 +336,8 @@ def main() -> int:
         "project_root": str(project_root),
         "artifact": str(artifact),
         "mode": "json_only" if args.no_panel else "live_panel",
+        "view": str(view) if view else None,
+        "documents": {name: str(path) for name, path in documents.items()},
         "url": None if args.no_panel else f"http://{args.host}:{args.port}",
         "python": str(python),
         "job_command": command,

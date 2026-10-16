@@ -22,6 +22,9 @@ param(
     [ValidateRange(1, 65535)]
     [int]$Port = 8765,
 
+    [string]$View,
+    [string[]]$Documents = @(),
+
     [switch]$NoPanel,
     [switch]$InstallOnly,
     [switch]$DryRun
@@ -73,9 +76,34 @@ if ([string]::IsNullOrWhiteSpace($ExpectedCommandSubstring)) {
 }
 
 $scriptRoot = [IO.Path]::GetFullPath($PSScriptRoot)
-$skillRoot = [IO.Path]::GetFullPath((Split-Path -Parent $scriptRoot))
 $runtime = Resolve-ExistingPath -Path (Join-Path $scriptRoot 'panel_runtime.py') -Label 'panel_runtime.py' -Leaf
-$template = Resolve-ExistingPath -Path (Join-Path $skillRoot 'assets\panel.html') -Label 'panel.html' -Leaf
+$viewPath = $null
+if (-not $NoPanel) {
+    if ([string]::IsNullOrWhiteSpace($View)) {
+        throw 'Live panel requires -View PATH. Create a project-specific HTML view first, or use -NoPanel.'
+    }
+    $viewCandidate = if ([IO.Path]::IsPathRooted($View)) { $View } else { Join-Path $project $View }
+    $viewPath = Resolve-ExistingPath -Path $viewCandidate -Label 'View' -Leaf
+    $viewHtml = Get-Content -LiteralPath $viewPath -Raw -Encoding UTF8
+    foreach ($marker in @('__PANEL_STATIC_STATE_JSON__', '__PANEL_BOOTSTRAP__')) {
+        if ([regex]::Matches($viewHtml, [regex]::Escape($marker)).Count -ne 1) {
+            throw "Project view must contain $marker exactly once."
+        }
+    }
+}
+$documentPaths = [ordered]@{}
+foreach ($document in $Documents) {
+    $parts = $document -split '=', 2
+    if ($parts.Count -ne 2 -or $parts[0] -notmatch '^[A-Za-z][A-Za-z0-9_-]*$' -or [string]::IsNullOrWhiteSpace($parts[1])) {
+        throw 'Documents must contain NAME=PATH values.'
+    }
+    $name = $parts[0]
+    if ($name -in @('panel_job', 'panel_manifest', 'panel_runtime') -or $documentPaths.Contains($name)) {
+        throw "Reserved or duplicate document name: $name"
+    }
+    $documentPath = if ([IO.Path]::IsPathRooted($parts[1])) { $parts[1] } else { Join-Path $artifact $parts[1] }
+    $documentPaths[$name] = [IO.Path]::GetFullPath($documentPath)
+}
 $manifestPath = Join-Path $artifact 'panel_manifest.json'
 $runtimePath = Join-Path $artifact 'panel_runtime.json'
 $staticOutput = Join-Path $artifact 'panel.final.html'
@@ -104,6 +132,8 @@ $plan = [ordered]@{
     job_task = $jobTask
     lifecycle_task = $lifecycleTask
     url = $url
+    view = $viewPath
+    documents = $documentPaths
     json_files = @(
         (Join-Path $artifact 'runner.json'),
         (Join-Path $artifact 'progress.json'),
@@ -146,8 +176,6 @@ $runtimeArguments = @(
     $runtime,
     '--artifact',
     $artifact,
-    '--template',
-    $template,
     '--runtime-state',
     $runtimePath,
     '--job-task-name',
@@ -157,10 +185,13 @@ $runtimeArguments = @(
     '--expected-command-substring',
     $ExpectedCommandSubstring
 )
+foreach ($name in $documentPaths.Keys) {
+    $runtimeArguments += @('--document', ($name + '=' + $documentPaths[$name]))
+}
 if ($NoPanel) {
     $runtimeArguments += @('--headless', '--skip-static')
 } else {
-    $runtimeArguments += @('--host', '127.0.0.1', '--port', [string]$Port, '--static-output', $staticOutput)
+    $runtimeArguments += @('--view', $viewPath, '--host', '127.0.0.1', '--port', [string]$Port, '--static-output', $staticOutput)
 }
 $lifecycleAction = New-ScheduledTaskAction -Execute $pythonPath `
     -Argument (($runtimeArguments | ForEach-Object { Quote-Argument ([string]$_) }) -join ' ') `

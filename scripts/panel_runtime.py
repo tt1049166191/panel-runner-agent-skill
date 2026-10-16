@@ -73,12 +73,12 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
     )
 
 
-def read_json(path: Path) -> tuple[dict[str, Any], str | None]:
+def read_json(path: Path) -> tuple[Any, str | None]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(value, dict):
+        if isinstance(value, (dict, list)):
             return value, None
-        return {}, "root is not an object"
+        return {}, "root is not an object or array"
     except FileNotFoundError:
         return {}, "missing"
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -100,13 +100,13 @@ def safe_stat(path: Path) -> dict[str, Any]:
         return {"exists": False, "size_bytes": 0, "modified_at": None, "mtime_ns": None}
 
 
-def first_value(documents: dict[str, dict[str, Any]], keys: tuple[str, ...]) -> Any:
+def first_value(documents: dict[str, Any], keys: tuple[str, ...]) -> Any:
     value, _ = first_value_with_source(documents, keys)
     return value
 
 
 def first_value_with_source(
-    documents: dict[str, dict[str, Any]], keys: tuple[str, ...]
+    documents: dict[str, Any], keys: tuple[str, ...]
 ) -> tuple[Any, str | None]:
     for document_name in (
         "progress",
@@ -117,6 +117,8 @@ def first_value_with_source(
         "panel_manifest",
     ):
         document = documents.get(document_name, {})
+        if not isinstance(document, dict):
+            continue
         for key in keys:
             value = document.get(key)
             if value is not None and value != "":
@@ -350,23 +352,45 @@ def cleanup_runtime(
     return {"attempted_at": now_iso(), "actions": actions}
 
 
+def parse_document_specs(values: list[str], artifact: Path) -> dict[str, Path]:
+    """Resolve explicit project documents without discovering unrelated JSON files."""
+    documents: dict[str, Path] = {}
+    for value in values:
+        name, separator, filename = value.partition("=")
+        if not separator or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", name) or not filename:
+            raise ValueError("--document must be NAME=PATH, with a simple unique name")
+        if name in {"panel_job", "panel_manifest", "panel_runtime"}:
+            raise ValueError(f"reserved lifecycle document name: {name}")
+        if name in documents:
+            raise ValueError(f"duplicate document name: {name}")
+        path = Path(filename).expanduser()
+        documents[name] = (path if path.is_absolute() else artifact / path).resolve()
+    return documents
+
+
 class SnapshotReader:
-    def __init__(self, artifact: Path, terminal_statuses: set[str]):
+    def __init__(
+        self, artifact: Path, terminal_statuses: set[str],
+        documents: dict[str, Path] | None = None,
+    ):
         self.artifact = artifact.resolve()
         self.terminal_statuses = terminal_statuses
+        self.paths = {Path(name).stem: self.artifact / name for name in DEFAULT_DOCUMENTS}
+        self.paths.update(documents or {})
 
     def snapshot(self, mode: str) -> dict[str, Any]:
-        documents: dict[str, dict[str, Any]] = {}
+        documents: dict[str, Any] = {}
         document_meta: dict[str, dict[str, Any]] = {}
-        for filename in DEFAULT_DOCUMENTS:
-            path = self.artifact / filename
+        for key, path in self.paths.items():
             value, error = read_json(path)
-            key = Path(filename).stem
             documents[key] = value
             document_meta[key] = {"path": str(path), **safe_stat(path), "read_error": error}
 
         project_status = normalize_status(first_value(documents, ("status", "state")))
-        supervisor_status = normalize_status(documents.get("panel_job", {}).get("status"))
+        supervisor_document = documents.get("panel_job", {})
+        supervisor_status = normalize_status(
+            supervisor_document.get("status") if isinstance(supervisor_document, dict) else None
+        )
         status = (
             supervisor_status
             if is_terminal_status(supervisor_status, self.terminal_statuses)
@@ -415,10 +439,9 @@ class SnapshotReader:
 
     def fingerprint(self) -> tuple[tuple[str, int | None, int], ...]:
         values: list[tuple[str, int | None, int]] = []
-        for filename in DEFAULT_DOCUMENTS:
-            path = self.artifact / filename
+        for name, path in self.paths.items():
             stat = safe_stat(path)
-            values.append((filename, stat.get("mtime_ns"), int(stat.get("size_bytes", 0))))
+            values.append((name, stat.get("mtime_ns"), int(stat.get("size_bytes", 0))))
         return tuple(values)
 
 
@@ -435,13 +458,13 @@ def render_html(template: str, snapshot: dict[str, Any] | None) -> str:
     payload = "null" if snapshot is None else escaped_script_json(snapshot)
     state_marker = "__PANEL_STATIC_STATE_JSON__"
     bootstrap_marker = "__PANEL_BOOTSTRAP__"
-    if state_marker not in template or bootstrap_marker not in template:
-        raise ValueError("template is missing a panel state/bootstrap marker")
+    if template.count(state_marker) != 1 or template.count(bootstrap_marker) != 1:
+        raise ValueError("project view must contain each panel state/bootstrap marker exactly once")
     if snapshot is None:
         bootstrap = """
 async function tick(){
   try{const response=await fetch('/api/state',{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);render(await response.json())}
-  catch(error){document.querySelector('#phase').textContent=`读取失败：${error}`}
+  catch(error){console.warn('Panel update failed',error);window.dispatchEvent(new CustomEvent('panel-error',{detail:String(error)}))}
   finally{setTimeout(tick,2000)}
 }
 tick();
@@ -449,6 +472,12 @@ tick();
     else:
         bootstrap = "render(embedded);"
     return template.replace(state_marker, payload, 1).replace(bootstrap_marker, bootstrap, 1)
+
+
+def load_view(path: Path) -> str:
+    view = path.read_text(encoding="utf-8")
+    render_html(view, None)  # Reject an incompatible view before launching any process.
+    return view
 
 
 class PanelServer(ThreadingHTTPServer):
@@ -579,10 +608,11 @@ def terminal_watcher(
 
 
 def parse_args() -> argparse.Namespace:
-    skill_root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description="Read-only JSON panel and terminal watcher")
     parser.add_argument("--artifact", type=Path, required=True)
-    parser.add_argument("--template", type=Path, default=skill_root / "assets" / "panel.html")
+    parser.add_argument("--view", "--template", dest="view", type=Path,
+                        help="project-authored self-contained HTML; required for live/static mode")
+    parser.add_argument("--document", action="append", default=[], metavar="NAME=PATH")
     parser.add_argument("--static-output", type=Path)
     parser.add_argument("--runtime-state", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
@@ -613,16 +643,24 @@ def main() -> int:
     for task_name in (args.job_task_name, args.lifecycle_task_name):
         if task_name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,120}", task_name):
             raise SystemExit(f"unsafe Scheduled Task name: {task_name!r}")
+    try:
+        documents = parse_document_specs(args.document, artifact)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     reader = SnapshotReader(
         artifact,
         {normalize_status(value) for value in args.terminal_status if value.strip()},
+        documents,
     )
     if args.snapshot_only:
         print(json.dumps(reader.snapshot("snapshot_only"), ensure_ascii=False, indent=2, allow_nan=False))
         return 0
 
-    template = args.template.resolve().read_text(encoding="utf-8")
-    static_output = None if args.skip_static else (args.static_output or artifact / "panel.final.html").resolve()
+    needs_view = not args.headless or args.staticize_only
+    if needs_view and args.view is None:
+        raise SystemExit("live/static mode requires --view PATH; create a project-specific HTML view first, or use --headless --skip-static")
+    template = load_view(args.view.resolve()) if needs_view else ""
+    static_output = None if args.skip_static or (args.headless and not args.staticize_only) else (args.static_output or artifact / "panel.final.html").resolve()
     runtime_path = (args.runtime_state or artifact / "panel_runtime.json").resolve()
     if args.staticize_only:
         if static_output is None:

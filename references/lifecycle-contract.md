@@ -10,11 +10,11 @@ Keep runtime evidence inside the chosen artifact directory:
 - `progress.json`: frequently updated status; include `status`, `updated_at` or heartbeat, progress counters, and speed/ETA when available.
 - `metrics.json`: append-only or replacement-safe evaluation history; never let a dashboard read race corrupt the writer.
 - `panel_job.json`: supervisor-owned minimum lifecycle record for arbitrary commands, including the verified job PID, command, exit code, and terminal state.
-- `panel_manifest.json`: project root, artifact root, exact task names, launcher path, interpreter, expected command substring, mode, URL, JSON paths, and static output.
+- `panel_manifest.json`: project root, artifact root, exact task names, launcher path, interpreter, expected command substring, mode, URL, project-authored view, mapped JSON paths, and static output.
 - `panel_runtime.json`: lifecycle state, finalization time, cleanup attempts, warnings, and final static path.
 - `panel.final.html`: standalone terminal snapshot in live-panel mode.
 
-The project-authored files above are optional when the job has no native progress protocol; `panel_job.json` still supplies minimum lifecycle status. Additional project JSON files may be shown, but the panel never writes them.
+The project-authored files above are optional when the job has no native progress protocol; the portable supervisor's `panel_job.json` still supplies minimum lifecycle status. Additional project JSON files can be explicitly mapped with `--document NAME=PATH`, including object or array roots; the panel never writes them. All monitored documents participate in terminal settling. Do not scan unrelated JSON or publish unrelated configuration as panel data.
 
 ## JSON writer rules
 
@@ -29,13 +29,14 @@ Compound statuses such as `stopped_by_user` or `training_complete_validation_sel
 
 ## Separation of responsibilities
 
-The job owns model/data/output state. The panel only reads JSON and optional hardware telemetry. It must not write commands, thresholds, selections, or control flags into job state.
+The job owns project state and outputs. The panel only reads JSON and optional hardware telemetry. It must not write commands, thresholds, selections, or control flags into job state.
 
-The lifecycle watcher may write only panel-owned manifest/runtime/static files and may perform the predeclared terminal cleanup. It must not change scientific results or selection decisions.
+The lifecycle watcher may write only panel-owned manifest/runtime/static files and may perform the predeclared terminal cleanup. Its transport, process identity checks, and cleanup are shared infrastructure; its presentation comes from a project-authored view, as defined in [project-view-contract.md](project-view-contract.md).
 
 ## Portable detached-process policy
 
 - The portable launcher must start the lifecycle watcher before the job and verify watcher health before returning success.
+- In live mode, validate the supplied project view before starting either process; there is no built-in visual fallback. JSON-only mode requires no view.
 - On Windows use a detached process plus a new process group; on macOS/Linux use a new session/process group.
 - Redirect stdin, stdout, and stderr to project-local logs. The launched processes must not retain the invoking agent's terminal handles.
 - Record the exact argv, expected command substring, lifecycle PID, job PID, platform, paths, and mode in `panel_manifest.json`.
@@ -70,10 +71,10 @@ The final HTML must:
 - contain the final JSON snapshot inline;
 - make no network or localhost request;
 - show a visible static/final badge and capture time;
-- retain progress, metrics, artifact path, and raw JSON inspection;
+- retain the project's chosen progress, meaningful metrics or results, artifact path, and embedded raw JSON;
 - open after the panel process and job task are stopped.
 
-Keep the dynamic template and final snapshot separate unless the project explicitly chooses an atomic replacement strategy.
+Freeze the same project-authored view with final data; do not substitute a generic final-report page. Keep the authored view and final snapshot separate unless the project explicitly chooses an atomic replacement strategy.
 
 ## JSON-only mode
 
